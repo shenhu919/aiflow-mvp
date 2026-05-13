@@ -1,12 +1,32 @@
 [build]
   command = "npm ci && npm run build"
   publish = "dist"
+  functions = "netlify/functions"
 
 [build.environment]
   NODE_VERSION = "18"
-  NPM_VERSION = "9"
 
+# 重定向 API 请求到 Netlify Functions
+[[redirects]]
+  from = "/api/execute"
+  to = "/.netlify/functions/api-execute"
+  status = 200
+
+[[redirects]]
+  from = "/api/status/:execId"
+  to = "/.netlify/functions/api-status?executionId=:execId"
+  status = 200
+
+# SPA fallback
 [[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
+
+# 配置 Background Functions (需要付费套餐)
+#[functions]
+#  deno = true
+
+#[[functions]]
+#  name = "api-execute"
+#  background = true
