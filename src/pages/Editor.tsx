@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useMemo } from 'react';
+import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import {
   ReactFlow,
   Background,
@@ -50,6 +50,26 @@ interface DragData {
 
 type NodeStatus = 'pending' | 'running' | 'completed' | 'error';
 
+interface LLMConfig {
+  apiKey: string;
+  model: 'deepseek-chat' | 'deepseek-reasoner';
+  temperature: number;
+}
+
+const DEFAULT_LLM_CONFIG: LLMConfig = {
+  apiKey: '',
+  model: 'deepseek-chat',
+  temperature: 0.7,
+};
+
+function loadLLMConfig(): LLMConfig {
+  try {
+    const saved = localStorage.getItem('aiflow-llm-config');
+    if (saved) return { ...DEFAULT_LLM_CONFIG, ...JSON.parse(saved) };
+  } catch {}
+  return { ...DEFAULT_LLM_CONFIG };
+}
+
 export default function Editor() {
   const [nodes, setNodes] = useState<Node[]>(() => {
     const saved = localStorage.getItem('aiflow-nodes');
@@ -80,7 +100,17 @@ export default function Editor() {
   const [execStatus, setExecStatus] = useState<'idle' | 'running' | 'done'>('idle');
   const [executionResults, setExecutionResults] = useState<any>(null);
   const [showResults, setShowResults] = useState<boolean>(false);
+  const [showSettings, setShowSettings] = useState<boolean>(false);
+  const [showInputModal, setShowInputModal] = useState<boolean>(false);
+  const [pendingInputNodes, setPendingInputNodes] = useState<Array<{ id: string; label: string; value: string }>>([]);
+  const [llmConfig, setLlmConfig] = useState<LLMConfig>(loadLLMConfig);
+  const [showApiKey, setShowApiKey] = useState<boolean>(false);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
+
+  // 持久化 LLM config
+  useEffect(() => {
+    localStorage.setItem('aiflow-llm-config', JSON.stringify(llmConfig));
+  }, [llmConfig]);
 
   const selectedNode = useMemo(
     () => nodes.find((n) => n.id === selectedNodeId) || null,
@@ -186,21 +216,57 @@ export default function Editor() {
     setNodes((nds) => { const next = [...nds, newNode]; save(next, edges); return next; });
   }, [edges, save]);
 
-  // 运行工作流 —— 同步执行模式
+  // 运行工作流 —— 先检查 Input 节点，再同步执行
   const runWorkflow = useCallback(() => {
+    // 1. 检查是否有 LLM config
+    const config = loadLLMConfig();
+    if (!config.apiKey) {
+      setShowSettings(true);
+      return;
+    }
+
+    // 2. 检查是否有 Input 节点需要用户输入
+    const inputNodes = nodes.filter(n => n.type === 'input');
+    if (inputNodes.length > 0) {
+      setPendingInputNodes(inputNodes.map(n => ({
+        id: n.id,
+        label: (n.data as any).label || 'Input',
+        value: (n.data as any).inputValue || '',
+      })));
+      setShowInputModal(true);
+      return;
+    }
+
+    // 3. 执行工作流
+    executeWorkflow(config, {});
+  }, [nodes, edges]);
+
+  // 实际执行工作流
+  const executeWorkflow = useCallback((config: LLMConfig, inputValues: Record<string, string>) => {
     setExecStatus('running');
     setShowResults(false);
+
+    // 将用户输入写入节点 data
+    const nodesWithInput = nodes.map(n => {
+      if (n.type === 'input' && inputValues[n.id]) {
+        return { ...n, data: { ...n.data, inputValue: inputValues[n.id] } };
+      }
+      return n;
+    });
+
     fetch('/api/execute', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nodes, edges }),
+      body: JSON.stringify({
+        nodes: nodesWithInput,
+        edges,
+        llmConfig: { apiKey: config.apiKey, model: config.model, temperature: config.temperature },
+      }),
     })
       .then(res => res.json())
       .then(data => {
-        // 保存执行结果
         setExecutionResults(data);
-        
-        // 根据结果更新节点状态
+
         if (data.results && Array.isArray(data.results)) {
           setNodes((nds) =>
             nds.map((n) => {
@@ -211,21 +277,17 @@ export default function Editor() {
           );
         }
         setExecStatus(data.status || 'completed');
-        
-        // 显示结果面板
         setShowResults(true);
-        
-        // 5秒后重置节点状态（延长到5秒让用户看清楚）
+
         setTimeout(() => {
           setExecStatus('idle');
           setNodes((nds) => nds.map((n) => ({ ...n, data: { ...n.data, status: 'pending' } })));
-        }, 5000);
+        }, 10000);
       })
       .catch(() => {
         setExecStatus('idle');
         setExecutionResults({ error: '执行失败，请检查网络连接' });
         setShowResults(true);
-        // 重置节点状态
         setNodes((nds) => nds.map((n) => ({ ...n, data: { ...n.data, status: 'pending' } })));
       });
   }, [nodes, edges]);
@@ -300,12 +362,25 @@ export default function Editor() {
             />
           </div>
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">提示词模板</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1">System Prompt（角色设定）</label>
             <textarea
-              defaultValue="请执行任务：\n- 输入：{input}\n- 输出：结构化结果"
-              rows={3}
+              value={(data.systemPrompt as string) || ''}
+              onChange={(e) => updateNodeData(selectedNode.id, { systemPrompt: e.target.value })}
+              rows={2}
+              placeholder="例：你是一个专业的数据分析专家..."
               className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none resize-none font-mono text-xs"
             />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">User Prompt（提示词模板）</label>
+            <textarea
+              value={(data.prompt as string) || ''}
+              onChange={(e) => updateNodeData(selectedNode.id, { prompt: e.target.value })}
+              rows={3}
+              placeholder="用 {input} 代表上游输入&#10;例：请分析以下内容并给出建议：{input}"
+              className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none resize-none font-mono text-xs"
+            />
+            <p className="text-xs text-gray-400 mt-1">💡 用 <code className="bg-gray-100 px-1 rounded">{'{input}'}</code> 代表上游节点的输出</p>
           </div>
         </>
       );
@@ -356,18 +431,30 @@ export default function Editor() {
     } else if (nodeType === 'input') {
       const data = selectedNode.data as Record<string, unknown>;
       specificFields = (
-        <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">输入类型</label>
-          <select
-            value={(data.inputType as string) || 'text'}
-            onChange={(e) => updateNodeData(selectedNode.id, { inputType: e.target.value })}
-            className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
-          >
-            <option value="text">📝 文本</option>
-            <option value="file">📄 文件</option>
-            <option value="api">🔌 API</option>
-          </select>
-        </div>
+        <>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">输入类型</label>
+            <select
+              value={(data.inputType as string) || 'text'}
+              onChange={(e) => updateNodeData(selectedNode.id, { inputType: e.target.value })}
+              className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+            >
+              <option value="text">📝 文本</option>
+              <option value="file">📄 文件</option>
+              <option value="api">🔌 API</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">默认输入内容</label>
+            <textarea
+              value={(data.inputValue as string) || ''}
+              onChange={(e) => updateNodeData(selectedNode.id, { inputValue: e.target.value })}
+              rows={3}
+              placeholder="运行工作流时会弹出输入框，也可在此设置默认值"
+              className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none resize-none"
+            />
+          </div>
+        </>
       );
     } else if (nodeType === 'output') {
       const data = selectedNode.data as Record<string, unknown>;
@@ -429,6 +516,13 @@ export default function Editor() {
           <p className="text-xs text-gray-500">拖拽左侧节点到画布，连接节点构建工作流</p>
         </div>
         <div className="flex gap-2">
+          <button
+            onClick={() => setShowSettings(true)}
+            className="px-3 py-2 rounded-lg text-gray-500 border-2 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50 transition-colors"
+            title="LLM 设置"
+          >
+            ⚙️
+          </button>
           {executionResults && (
             <button
               onClick={() => setShowResults(!showResults)}
@@ -570,7 +664,14 @@ export default function Editor() {
             {/* 头部 */}
             <div className="flex items-center justify-between px-6 py-4 border-b">
               <div>
-                <h2 className="text-lg font-bold text-gray-800">执行结果</h2>
+                <h2 className="text-lg font-bold text-gray-800">
+                  执行结果
+                  {executionResults.llmUsed && (
+                    <span className="ml-2 text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-normal">
+                      🤖 DeepSeek {executionResults.model || ''}
+                    </span>
+                  )}
+                </h2>
                 {executionResults.executionId && (
                   <p className="text-xs text-gray-400 font-mono">{executionResults.executionId}</p>
                 )}
@@ -584,6 +685,11 @@ export default function Editor() {
                     {executionResults.summary.errors > 0 && (
                       <span className="bg-red-100 text-red-700 px-2 py-1 rounded-full">
                         {executionResults.summary.errors} 错误
+                      </span>
+                    )}
+                    {executionResults.totalTokens > 0 && (
+                      <span className="bg-blue-100 text-blue-700 px-2 py-1 rounded-full">
+                        🔤 {executionResults.totalTokens} tokens
                       </span>
                     )}
                   </div>
@@ -615,13 +721,18 @@ export default function Editor() {
 
                   return (
                     <div key={r.nodeId || idx} className={`border rounded-xl p-4 ${statusColor}`}>
-                      <div className="flex items-center gap-2 mb-2">
+                      <div className="flex items-center gap-2 mb-2 flex-wrap">
                         <span className="text-sm">{statusIcon}</span>
                         <span className="font-semibold text-sm text-gray-800">{nodeLabel}</span>
                         <span className="text-xs text-gray-400 font-mono">{r.nodeId}</span>
                         <span className="text-xs bg-white border border-gray-200 px-2 py-0.5 rounded-full text-gray-500">
                           {nodeType}
                         </span>
+                        {r.output?.tokenUsage && (
+                          <span className="text-xs bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full">
+                            {r.output.tokenUsage.prompt_tokens || 0}+{r.output.tokenUsage.completion_tokens || 0} tokens
+                          </span>
+                        )}
                       </div>
                       {r.status === 'error' && r.error && (
                         <div className="text-sm text-red-600 bg-red-100 rounded-lg px-3 py-2 mt-1">
@@ -629,7 +740,7 @@ export default function Editor() {
                         </div>
                       )}
                       {outputText && (
-                        <pre className="mt-2 text-xs text-gray-600 bg-white rounded-lg p-3 border border-gray-100 whitespace-pre-wrap font-mono leading-relaxed max-h-40 overflow-y-auto">
+                        <pre className="mt-2 text-xs text-gray-600 bg-white rounded-lg p-3 border border-gray-100 whitespace-pre-wrap font-mono leading-relaxed max-h-60 overflow-y-auto">
                           {outputText}
                         </pre>
                       )}
@@ -653,6 +764,132 @@ export default function Editor() {
                 className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 transition-colors"
               >
                 关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setShowSettings(false)} />
+          <div className="relative bg-white rounded-2xl shadow-2xl w-[460px] z-10">
+            <div className="flex items-center justify-between px-6 py-4 border-b">
+              <h2 className="text-lg font-bold text-gray-800">⚙️ LLM 设置</h2>
+              <button onClick={() => setShowSettings(false)} className="w-8 h-8 rounded-lg bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-gray-500">✕</button>
+            </div>
+            <div className="px-6 py-5 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  API Key <span className="text-red-500">*</span>
+                </label>
+                <div className="relative">
+                  <input
+                    type={showApiKey ? 'text' : 'password'}
+                    value={llmConfig.apiKey}
+                    onChange={(e) => setLlmConfig(prev => ({ ...prev, apiKey: e.target.value }))}
+                    placeholder="sk-..."
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey(!showApiKey)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 px-1"
+                  >
+                    {showApiKey ? '🙈' : '👁️'}
+                  </button>
+                </div>
+                <p className="text-xs text-gray-400 mt-1">
+                  从 <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer" className="text-indigo-500 hover:underline">DeepSeek 控制台</a> 获取
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">模型</label>
+                <select
+                  value={llmConfig.model}
+                  onChange={(e) => setLlmConfig(prev => ({ ...prev, model: e.target.value as any }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                >
+                  <option value="deepseek-chat">deepseek-chat（通用对话，推荐）</option>
+                  <option value="deepseek-reasoner">deepseek-reasoner（深度推理）</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Temperature: <span className="text-indigo-600 font-mono">{llmConfig.temperature.toFixed(1)}</span>
+                </label>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.1"
+                  value={llmConfig.temperature}
+                  onChange={(e) => setLlmConfig(prev => ({ ...prev, temperature: parseFloat(e.target.value) }))}
+                  className="w-full accent-indigo-600"
+                />
+                <div className="flex justify-between text-xs text-gray-400">
+                  <span>精确 (0)</span>
+                  <span>创意 (1)</span>
+                </div>
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t bg-gray-50 rounded-b-2xl flex justify-end">
+              <button
+                onClick={() => setShowSettings(false)}
+                className="px-5 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 transition-colors"
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Input Modal */}
+      {showInputModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setShowInputModal(false)} />
+          <div className="relative bg-white rounded-2xl shadow-2xl w-[520px] z-10">
+            <div className="flex items-center justify-between px-6 py-4 border-b">
+              <h2 className="text-lg font-bold text-gray-800">📥 填写输入内容</h2>
+              <button onClick={() => setShowInputModal(false)} className="w-8 h-8 rounded-lg bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-gray-500">✕</button>
+            </div>
+            <div className="px-6 py-5 space-y-4">
+              <p className="text-sm text-gray-500">请为每个输入节点提供内容：</p>
+              {pendingInputNodes.map(inp => (
+                <div key={inp.id}>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">{inp.label}</label>
+                  <textarea
+                    value={inp.value}
+                    onChange={(e) => setPendingInputNodes(prev =>
+                      prev.map(p => p.id === inp.id ? { ...p, value: e.target.value } : p)
+                    )}
+                    rows={3}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none resize-none"
+                    placeholder="在此输入..."
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="px-6 py-4 border-t bg-gray-50 rounded-b-2xl flex justify-end gap-2">
+              <button
+                onClick={() => setShowInputModal(false)}
+                className="px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-600 hover:bg-gray-100 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  setShowInputModal(false);
+                  const config = loadLLMConfig();
+                  const inputValues: Record<string, string> = {};
+                  pendingInputNodes.forEach(p => { inputValues[p.id] = p.value; });
+                  executeWorkflow(config, inputValues);
+                }}
+                className="px-5 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 transition-colors"
+              >
+                ▶ 开始执行
               </button>
             </div>
           </div>

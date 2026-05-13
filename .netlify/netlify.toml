@@ -8,11 +8,11 @@ headers = []
 publish = "C:\\Users\\11943\\WorkBuddy\\2026-05-11-task-3\\aiflow-mvp\\dist"
 publishOrigin = "config"
 commandOrigin = "config"
-command = "echo 'Skipping build'"
+command = "npm run build"
 functions = "C:\\Users\\11943\\WorkBuddy\\2026-05-11-task-3\\aiflow-mvp\\netlify\\functions"
 
 [build.environment]
-NODE_VERSION = "18"
+NODE_VERSION = "20"
 
 [build.processing]
 
