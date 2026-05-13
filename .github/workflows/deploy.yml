@@ -3,7 +3,7 @@ name: Deploy to Netlify
 on:
   push:
     branches: [main]
-  pul_request:
+  pull_request:
     branches: [main]
 
 jobs:
