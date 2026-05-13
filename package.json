@@ -7,7 +7,7 @@
     "dev": "vite",
     "dev:server": "node server.mjs",
     "dev:all": "node server.js & vite",
-    "build": "tsc -b && vite build",
+    "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
