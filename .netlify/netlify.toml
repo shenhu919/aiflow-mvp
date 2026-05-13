@@ -7,8 +7,8 @@ headers = []
 [build]
 publish = "C:\\Users\\11943\\WorkBuddy\\2026-05-11-task-3\\aiflow-mvp\\dist"
 publishOrigin = "config"
-commandOrigin = "ui"
-command = "npm run build"
+commandOrigin = "config"
+command = "echo 'Skipping build'"
 functions = "C:\\Users\\11943\\WorkBuddy\\2026-05-11-task-3\\aiflow-mvp\\netlify\\functions"
 
 [build.environment]
