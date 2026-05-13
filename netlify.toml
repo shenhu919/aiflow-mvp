@@ -1,5 +1,6 @@
 [build]
-  command = "npm ci && npm run build"
+  # 已在本地构建，跳过 Netlify 构建过程
+  command = "echo 'Skipping build'"
   publish = "dist"
   functions = "netlify/functions"
 
